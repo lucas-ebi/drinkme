@@ -8,7 +8,7 @@
 //   drinkme <alignment.fasta> [options]
 //   Options:
 //     -k, --components N    MCA dimensions to keep  (default: 2)
-//     -t, --threshold F     Min non-gap fraction to keep a column (default: 0.9)
+//     -t, --threshold F     Min non-gap fraction to keep a column (default: 5)
 //     --keep-lowercase      Treat lowercase residues as valid (not as gaps)
 //     -v, --verbose         Print diagnostics to stderr
 
@@ -29,7 +29,7 @@ static void usage(const char* prog) {
         << "Usage: " << prog << " <alignment.fasta> [options]\n"
         << "Options:\n"
         << "  -k, --components N   MCA dimensions to keep (default: 2)\n"
-        << "  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.9)\n"
+        << "  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)\n"
         << "  --keep-lowercase     Treat lowercase residues as valid (not as gaps)\n"
         << "  -v, --verbose        Print diagnostics to stderr\n";
 }
@@ -37,7 +37,7 @@ static void usage(const char* prog) {
 int main(int argc, char* argv[]) {
     std::string fasta_path;
     int    n_components      = 2;
-    double threshold         = 0.9;
+    double threshold         = 0.5;
     bool   lowercase_as_gap  = true;
     bool   verbose           = false;
 

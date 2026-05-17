@@ -18,7 +18,7 @@ inline CleanseResult cleanse_columns(
     const std::vector<std::string>& seqs,
     char   indel           = '-',
     bool   lowercase_as_gap = true,
-    double threshold        = 0.9)
+    double threshold        = 0.5)
 {
     if (seqs.empty()) throw std::runtime_error("empty sequence set");
     const int N = static_cast<int>(seqs.size());

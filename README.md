@@ -16,7 +16,7 @@ Shrink a multiple sequence alignment to achieve phylogeny reconstruction.
 
 ## Performance
 
-On a modern laptop, clustering ~10k sequences from an MSA of ~1k+ columns (~50 informative columns after column filtering) completes in under **3 seconds**. Memory usage remains modest because only the reduced MCA coordinate matrix (size N × k) and O(N) auxiliary vectors are stored.
+On a modern laptop, clustering ~10k sequences from an MSA of ~1k+ columns (~200 informative columns after column filtering) completes in under **60 seconds**. Memory usage remains modest because only the reduced MCA coordinate matrix (size N × k) and O(N) auxiliary vectors are stored.
 
 ## Dependencies
 
@@ -40,7 +40,7 @@ drinkme <alignment.fasta> [options]
 
 Options:
   -k, --components N   MCA dimensions to keep (default: 2)
-  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.9)
+  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)
   --keep-lowercase     Treat lowercase residues as valid (not as gaps)
   -v, --verbose        Print diagnostics to stderr
 ```
