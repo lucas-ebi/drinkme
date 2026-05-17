@@ -1,6 +1,6 @@
 # DrinkMe
 
-Shrink a multiple sequence alignment into a phylogenetic tree.
+Shrink a multiple sequence alignment to achieve phylogeny reconstruction.
 
 **Pipeline:** FASTA MSA → column cleansing → Multiple Correspondence Analysis → Ward hierarchical clustering → Newick tree
 
