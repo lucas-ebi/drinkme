@@ -7,16 +7,23 @@ Shrink a multiple sequence alignment to achieve phylogeny reconstruction.
 ## Method
 
 1. **Column cleansing** — drops alignment columns whose gap fraction exceeds `1 - threshold`. Lowercase residues (HMMER insert states) are counted as gaps by default. All input sequences are retained regardless.
-2. **MCA** — treats each surviving column as a categorical variable and projects sequences into a low-dimensional Euclidean space via SVD of the standardised residual matrix. The trivial first component (σ ≈ 1) is discarded; the next *k* components are retained.
-3. **Ward clustering** — agglomerative clustering minimising within-cluster variance at each merge step.  
-   The implementation uses the **nearest‑neighbour chain algorithm** (O(N²·d) time, O(N·d) memory) which exploits the reducibility of Ward's distance:
-   `d(AB, C) ≥ min(d(A,C), d(B,C))`  
-   This produces exactly the same dendrogram as the naïve O(N³) scan (as used in scipy & fastcluster) but scales to tens of thousands of sequences. Branch lengths in the output tree equal Ward merge distances.
+2. **MCA** — the standardised residual matrix S is never formed explicitly; instead it is applied as a sparse matrix–vector product (via the binary indicator matrix Z, N×L non-zeros) plus a rank-1 correction. A randomised truncated SVD (Halko–Martinsson–Tropp 2011) with subspace iteration extracts only the *k+1* components needed, at O(N·L·k) cost. The trivial first component (σ ≈ 1) is discarded.
+3. **Ward clustering** — agglomerative clustering minimising within-cluster variance at each merge step. The implementation uses the **nearest-neighbour chain algorithm** (O(N²·d) time, O(N·d) memory), which exploits the reducibility of Ward's distance (`d(AB,C) ≥ min(d(A,C), d(B,C))`), and produces the same dendrogram as the naïve O(N³) scan. Branch lengths equal Ward merge distances.
 4. **Newick output** — written to stdout, ready for any tree viewer (e.g. FigTree, iTOL, ETE3).
 
 ## Performance
 
-On a modern laptop, clustering ~10k sequences from an MSA of ~1k+ columns (~200 informative columns after column filtering) completes in under **60 seconds**. Memory usage remains modest because only the reduced MCA coordinate matrix (size N × k) and O(N) auxiliary vectors are stored.
+Indicative timings on a modern laptop (~10k sequences, ~1k alignment columns, ~200 retained after cleansing):
+
+| Step | Time |
+| ------ | ------ |
+| Parse + cleanse | ~100 ms |
+| MCA | ~200 ms |
+| Ward | ~500 ms |
+| Newick | ~10 ms |
+| **Total** | **< 1 s** |
+
+Memory scales as O(N·L) for the sparse indicator matrix, plus O((N+J)·k) workspace for the SVD — no dense N×J matrix is ever allocated.
 
 ## Dependencies
 

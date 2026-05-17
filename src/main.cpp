@@ -18,6 +18,7 @@
 #include "mca.hpp"
 #include "newick.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -71,7 +72,14 @@ int main(int argc, char* argv[]) {
     if (fasta_path.empty()) { usage(argv[0]); return 1; }
 
     try {
+        using clk = std::chrono::steady_clock;
+        using ms  = std::chrono::milliseconds;
+        auto elapsed = [](clk::time_point a, clk::time_point b) {
+            return std::chrono::duration_cast<ms>(b - a).count();
+        };
+
         // --- 1. Parse alignment ---
+        auto t0   = clk::now();
         auto seqs = parse_fasta(fasta_path);
         std::vector<std::string> names, raw;
         names.reserve(seqs.size());
@@ -83,6 +91,7 @@ int main(int argc, char* argv[]) {
                       << " sequences, length " << raw[0].size() << '\n';
 
         // --- 2. Cleanse columns ---
+        auto t1 = clk::now();
         auto cl = cleanse_columns(raw, '-', lowercase_as_gap, threshold);
         if (verbose)
             std::cerr << "[drinkme] kept " << cl.kept_columns.size()
@@ -90,6 +99,7 @@ int main(int argc, char* argv[]) {
                       << threshold << ")\n";
 
         // --- 3. MCA ---
+        auto t2 = clk::now();
         if (verbose)
             std::cerr << "[drinkme] MCA (k=" << n_components << ")...\n";
 
@@ -107,12 +117,25 @@ int main(int argc, char* argv[]) {
         }
 
         // --- 4. Ward hierarchical clustering ---
+        auto t3 = clk::now();
         if (verbose) std::cerr << "[drinkme] Ward clustering...\n";
         auto Z = ward_linkage(mca_res.coords);
 
         // --- 5. Newick output ---
+        auto t4 = clk::now();
         if (verbose) std::cerr << "[drinkme] writing Newick tree...\n";
         std::cout << to_newick(Z, names) << '\n';
+
+        if (verbose) {
+            auto t5 = clk::now();
+            std::cerr << "[drinkme] timings (ms):"
+                      << "  parse="   << elapsed(t0, t1)
+                      << "  cleanse=" << elapsed(t1, t2)
+                      << "  mca="     << elapsed(t2, t3)
+                      << "  ward="    << elapsed(t3, t4)
+                      << "  newick="  << elapsed(t4, t5)
+                      << "  total="   << elapsed(t0, t5) << '\n';
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';

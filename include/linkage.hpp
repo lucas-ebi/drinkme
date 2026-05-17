@@ -39,20 +39,24 @@ inline std::vector<LinkageRow> ward_linkage(const Eigen::MatrixXd& X) {
 
     // Pre-allocate for 2N-1 potential nodes
     const int M = 2 * N - 1;
-    std::vector<bool>            active(M, false);
-    std::vector<int>             sz(M, 0);
-    std::vector<Eigen::VectorXd> ctr(M);
+    const int d = static_cast<int>(X.cols());
 
-    for (int i = 0; i < N; ++i) {
-        active[i] = true;
-        sz[i]     = 1;
-        ctr[i]    = X.row(i);
-    }
+    // char instead of bool avoids std::vector<bool>'s bit-packing overhead.
+    std::vector<char> active(M, 0);
+    std::vector<int>  sz(M, 0);
 
-    auto ward_d = [&](int a, int b) -> double {
-        double scale = std::sqrt(
-            static_cast<double>(sz[a]) * sz[b] / (sz[a] + sz[b]));
-        return scale * (ctr[a] - ctr[b]).norm();
+    // Row-major layout: centroid of cluster i is two adjacent doubles at row i.
+    // Contiguous storage eliminates the per-VectorXd heap indirection.
+    using CtrMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    CtrMat ctr(M, d);
+    ctr.topRows(N) = X;
+
+    for (int i = 0; i < N; ++i) { active[i] = 1; sz[i] = 1; }
+
+    // Work in D² to avoid two sqrts per distance call; sqrt only for heights.
+    auto ward_d2 = [&](int a, int b) -> double {
+        double s = static_cast<double>(sz[a]) * sz[b] / (sz[a] + sz[b]);
+        return s * (ctr.row(a) - ctr.row(b)).squaredNorm();
     };
 
     // NN‑chain algorithm — discovers merges in chain order, then sorts by height.
@@ -72,39 +76,38 @@ inline std::vector<LinkageRow> ward_linkage(const Eigen::MatrixXd& X) {
 
     while (num_active > 1) {
         if (chain.empty()) {
-            // Start a new chain from any active cluster
-            for (int i = 0; i < M; ++i)
+            for (int i = 0; i < next; ++i)
                 if (active[i]) { chain.push_back(i); break; }
         }
 
         const int top  = chain.back();
         const int prev = (chain.size() >= 2) ? chain[chain.size() - 2] : -1;
 
-        // Nearest neighbour of `top`, tie‑breaking toward `prev`
-        int    nn   = -1;
-        double nn_d = std::numeric_limits<double>::infinity();
-        for (int j = 0; j < M; ++j) {
+        // Nearest neighbour of `top`, tie‑breaking toward `prev`.
+        // Scan only [0, next): slots beyond next have never been written.
+        int    nn    = -1;
+        double nn_d2 = std::numeric_limits<double>::infinity();
+        for (int j = 0; j < next; ++j) {
             if (!active[j] || j == top) continue;
-            double d = ward_d(top, j);
-            if (d < nn_d || (d == nn_d && j == prev)) { nn = j; nn_d = d; }
+            double d2 = ward_d2(top, j);
+            if (d2 < nn_d2 || (d2 == nn_d2 && j == prev)) { nn = j; nn_d2 = d2; }
         }
 
         if (nn == prev) {          // reciprocal nearest neighbours → merge
             chain.pop_back();
             chain.pop_back();
 
-            // Keep left <= right (purely cosmetic, matches original behavior)
             int left  = std::min(top, prev);
             int right = std::max(top, prev);
 
             const int nab = sz[left] + sz[right];
-            ctr[next]     = (sz[left] * ctr[left] + sz[right] * ctr[right]) / nab;
+            ctr.row(next) = (sz[left] * ctr.row(left) + sz[right] * ctr.row(right)) / nab;
             sz[next]      = nab;
-            active[next]  = true;
-            active[left]  = false;
-            active[right] = false;
+            active[next]  = 1;
+            active[left]  = 0;
+            active[right] = 0;
 
-            raw_merges.push_back({left, right, nn_d, nab, next});
+            raw_merges.push_back({left, right, std::sqrt(nn_d2), nab, next});
             ++next;
             --num_active;
         } else {

@@ -1,95 +1,208 @@
 #pragma once
-// Multiple Correspondence Analysis on a categorical MSA.
+// Multiple Correspondence Analysis on a categorical MSA — scalable version.
 //
-// Algorithm: standard CA-style SVD on the row-mass-standardised indicator matrix.
-//   1.  Build binary indicator matrix Z (N × J) — one column per unique
-//       residue per alignment column; each row sums to L (alignment length).
-//   2.  Form the correspondence matrix P = Z / (N·L).
-//   3.  Compute row masses r_i = 1/N (uniform) and column masses c_j.
-//   4.  Standardised residual matrix S = Dr^{-½} (P − r cᵀ) Dc^{-½}.
-//   5.  Thin SVD of S.  The first singular value is trivially ≈ 1 and is
-//       discarded; the next n_components columns give the principal row coords:
-//         F = Dr^{-½} U[·,1:k] Σ[1:k].
+// Algorithm: randomized truncated SVD (Halko–Martinsson–Tropp, 2011) applied
+// implicitly to the row-mass-standardised indicator matrix S, where S is never
+// materialised — it's represented as a sparse matvec minus a rank-1 correction.
+// Recovers the top n_components+1 singular triples; the trivial σ ≈ 1 leading
+// component is discarded, as in standard MCA.
+//
+// Pipeline:
+//   1. Build sparse indicator matrix Z (N × J) — exactly N·L non-zeros.
+//   2. Compute row/column masses; never form P, rcᵀ, or S explicitly.
+//   3. S is applied implicitly as a sparse matvec minus a rank-1 correction:
+//        S      x  =  Dr^{-½} (Z/total) Dc^{-½} x  −  √r (√cᵀ x)
+//        Sᵀ     y  =  Dc^{-½} (Zᵀ/total) Dr^{-½} y  −  √c (√rᵀ y)
+//   4. Randomized SVD (Halko–Martinsson–Tropp, 2011) extracts top k+1
+//      singular triples in O((nnz(Z) + N + J) · (k+p) · iters) time.
+//   5. Trivial σ ≈ 1 component is dropped; row principal coords returned.
+//
+// Memory: O(N·L) for Z, plus O((N+J)·(k+p)) workspace.  No dense N×J matrix
+// is ever allocated, so this scales to MSAs that wouldn't fit otherwise.
 
 #include <Eigen/Dense>
+#include <Eigen/SparseCore>
+#include <Eigen/QR>
 #include <Eigen/SVD>
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 struct MCAResult {
     Eigen::MatrixXd coords;   // N × n_components row principal coordinates
-    Eigen::VectorXd inertia;  // squared singular values (explained inertia) per component
+    Eigen::VectorXd inertia;  // squared singular values per retained component
 };
 
+namespace mca_detail {
+
+// Implicit operator representing the standardised residual matrix S.
+// Applies S and Sᵀ to vectors / matrices without ever materialising S or P.
+struct SOperator {
+    const Eigen::SparseMatrix<double, Eigen::RowMajor>& Z;   // N × J
+    const Eigen::SparseMatrix<double, Eigen::ColMajor>& Zt;  // J × N (= Zᵀ)
+    const Eigen::VectorXd& dr_inv_sqrt;  // N
+    const Eigen::VectorXd& dc_inv_sqrt;  // J
+    const Eigen::VectorXd& sqrt_r;       // N
+    const Eigen::VectorXd& sqrt_c;       // J
+    double total;
+    int N, J;
+
+    // Y = S · X, where X is J × b and Y is N × b.
+    Eigen::MatrixXd apply(const Eigen::MatrixXd& X) const {
+        Eigen::MatrixXd Xs = dc_inv_sqrt.asDiagonal() * X;
+        Eigen::MatrixXd Y  = (Z * Xs) / total;
+        Y = dr_inv_sqrt.asDiagonal() * Y;
+        // Rank-1 correction: subtract √r · (√cᵀ X) for each column.
+        Eigen::RowVectorXd coef = sqrt_c.transpose() * X;  // 1 × b
+        Y.noalias() -= sqrt_r * coef;
+        return Y;
+    }
+
+    // X = Sᵀ · Y, where Y is N × b and X is J × b.
+    Eigen::MatrixXd apply_t(const Eigen::MatrixXd& Y) const {
+        Eigen::MatrixXd Ys = dr_inv_sqrt.asDiagonal() * Y;
+        Eigen::MatrixXd X  = (Zt * Ys) / total;
+        X = dc_inv_sqrt.asDiagonal() * X;
+        Eigen::RowVectorXd coef = sqrt_r.transpose() * Y;  // 1 × b
+        X.noalias() -= sqrt_c * coef;
+        return X;
+    }
+};
+
+// Randomized SVD via subspace iteration with re-orthogonalisation.
+// Returns top `k` singular triples (U: N×k, s: k, V: J×k), ordered descending.
+struct TruncatedSVD {
+    Eigen::MatrixXd U;
+    Eigen::VectorXd s;
+    Eigen::MatrixXd V;
+};
+
+inline TruncatedSVD randomized_svd(const SOperator& op,
+                                   int k,
+                                   int oversample = 10,
+                                   int n_iter     = 4,
+                                   uint64_t seed  = 0xC0FFEE) {
+    const int N = op.N, J = op.J;
+    const int r = std::min({k + oversample, N, J});
+
+    // Draw J × r Gaussian test matrix.
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<double> nrm(0.0, 1.0);
+    Eigen::MatrixXd Omega(J, r);
+    for (int j = 0; j < J; ++j)
+        for (int c = 0; c < r; ++c) Omega(j, c) = nrm(rng);
+
+    // Range finder with subspace iteration.  Re-orthogonalise each pass to
+    // damp roundoff that would otherwise wash out the trailing singular vectors.
+    Eigen::MatrixXd Y = op.apply(Omega);  // N × r
+    Eigen::HouseholderQR<Eigen::MatrixXd> qr(Y);
+    Eigen::MatrixXd Q = qr.householderQ() * Eigen::MatrixXd::Identity(N, r);
+
+    for (int it = 0; it < n_iter; ++it) {
+        Eigen::MatrixXd Z2 = op.apply_t(Q);  // J × r
+        qr.compute(Z2);
+        Eigen::MatrixXd Qz = qr.householderQ() * Eigen::MatrixXd::Identity(J, r);
+        Y = op.apply(Qz);                    // N × r
+        qr.compute(Y);
+        Q = qr.householderQ() * Eigen::MatrixXd::Identity(N, r);
+    }
+
+    // Project to a small r × J problem and SVD it directly.
+    Eigen::MatrixXd B = op.apply_t(Q).transpose();  // r × J
+    Eigen::BDCSVD<Eigen::MatrixXd> svd(B, Eigen::ComputeThinU | Eigen::ComputeThinV);
+
+    TruncatedSVD out;
+    out.U = Q * svd.matrixU().leftCols(k);
+    out.s = svd.singularValues().head(k);
+    out.V = svd.matrixV().leftCols(k);
+    return out;
+}
+
+}  // namespace mca_detail
+
 inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components = 2) {
+    using namespace mca_detail;
+
     if (seqs.empty()) throw std::runtime_error("empty sequence set");
     const int N = static_cast<int>(seqs.size());
     const int L = static_cast<int>(seqs[0].size());
     if (L == 0) throw std::runtime_error("zero-length sequences");
 
-    // Build per-column alphabet (sorted for binary search)
-    std::vector<std::vector<char>> alpha(L);
-    for (int col = 0; col < L; ++col) {
-        std::map<char, int> freq;
-        for (const auto& s : seqs) ++freq[s[col]];
-        for (auto& [c, _] : freq) alpha[col].push_back(c);
-        std::sort(alpha[col].begin(), alpha[col].end());
-    }
-
-    // Column offsets in indicator matrix
+    // ---- 1. Per-column alphabet via O(1) char lookup tables. ---------------
+    std::vector<std::array<int, 256>> lookup(L);
+    for (auto& tbl : lookup) tbl.fill(-1);
     std::vector<int> off(L + 1, 0);
-    for (int col = 0; col < L; ++col)
-        off[col + 1] = off[col] + static_cast<int>(alpha[col].size());
+
+    for (int col = 0; col < L; ++col) {
+        // First pass: mark observed characters.
+        std::array<bool, 256> seen{};
+        for (const auto& s : seqs) seen[static_cast<unsigned char>(s[col])] = true;
+        // Assign indices in sorted character order (stable, reproducible).
+        int idx = 0;
+        for (int ch = 0; ch < 256; ++ch)
+            if (seen[ch]) lookup[col][ch] = idx++;
+        off[col + 1] = off[col] + idx;
+    }
     const int J = off[L];
 
-    // Build Z (N × J)
-    Eigen::MatrixXd Z = Eigen::MatrixXd::Zero(N, J);
+    // ---- 2. Build sparse Z (N × J) — exactly N·L non-zeros. ---------------
+    std::vector<Eigen::Triplet<double>> trips;
+    trips.reserve(static_cast<size_t>(N) * L);
     for (int i = 0; i < N; ++i) {
+        const std::string& s = seqs[i];
         for (int col = 0; col < L; ++col) {
-            char c = seqs[i][col];
-            const auto& a = alpha[col];
-            auto it = std::lower_bound(a.begin(), a.end(), c);
-            if (it != a.end() && *it == c)
-                Z(i, off[col] + static_cast<int>(it - a.begin())) = 1.0;
+            int idx = lookup[col][static_cast<unsigned char>(s[col])];
+            if (idx >= 0)
+                trips.emplace_back(i, off[col] + idx, 1.0);
         }
     }
+    Eigen::SparseMatrix<double, Eigen::RowMajor> Z(N, J);
+    Z.setFromTriplets(trips.begin(), trips.end());
+    Z.makeCompressed();
+    Eigen::SparseMatrix<double, Eigen::ColMajor> Zt = Z.transpose();
+    Zt.makeCompressed();
 
-    // Correspondence matrix and masses
+    // ---- 3. Masses and inverse-square-root scalings. -----------------------
     const double total = static_cast<double>(N) * L;
-    Eigen::MatrixXd P = Z / total;
-    Eigen::VectorXd r      = P.rowwise().sum();  // ≈ 1/N for all rows
-    Eigen::VectorXd c_mass = P.colwise().sum();  // J
+    Eigen::VectorXd row_sums = Eigen::VectorXd::Zero(N);
+    Eigen::VectorXd col_sums = Eigen::VectorXd::Zero(J);
+    for (int k = 0; k < Z.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Z, k); it; ++it) {
+            row_sums(it.row()) += it.value();
+            col_sums(it.col()) += it.value();
+        }
+    Eigen::VectorXd r      = row_sums / total;   // ≈ 1/N
+    Eigen::VectorXd c_mass = col_sums / total;
 
-    // Inverse-sqrt mass diagonals (guard against zero-mass columns)
-    Eigen::VectorXd dr_inv_sqrt(N), dc_inv_sqrt(J);
-    for (int i = 0; i < N; ++i)
-        dr_inv_sqrt(i) = (r(i) > 1e-14) ? 1.0 / std::sqrt(r(i)) : 0.0;
-    for (int j = 0; j < J; ++j)
-        dc_inv_sqrt(j) = (c_mass(j) > 1e-14) ? 1.0 / std::sqrt(c_mass(j)) : 0.0;
+    Eigen::VectorXd dr_inv_sqrt(N), dc_inv_sqrt(J), sqrt_r(N), sqrt_c(J);
+    for (int i = 0; i < N; ++i) {
+        sqrt_r(i)      = std::sqrt(r(i));
+        dr_inv_sqrt(i) = (r(i) > 1e-14) ? 1.0 / sqrt_r(i) : 0.0;
+    }
+    for (int j = 0; j < J; ++j) {
+        sqrt_c(j)      = std::sqrt(c_mass(j));
+        dc_inv_sqrt(j) = (c_mass(j) > 1e-14) ? 1.0 / sqrt_c(j) : 0.0;
+    }
 
-    // Standardised residual matrix S = Dr^{-½} (P − r cᵀ) Dc^{-½}
-    Eigen::MatrixXd S = P;
-    for (int j = 0; j < J; ++j) S.col(j) -= r * c_mass(j);
-    for (int i = 0; i < N; ++i) S.row(i) *= dr_inv_sqrt(i);
-    for (int j = 0; j < J; ++j) S.col(j) *= dc_inv_sqrt(j);
+    // ---- 4. Implicit operator + randomized truncated SVD. ------------------
+    SOperator S{Z, Zt, dr_inv_sqrt, dc_inv_sqrt, sqrt_r, sqrt_c, total, N, J};
 
-    // Thin SVD — only U is needed for row coordinates
-    Eigen::BDCSVD<Eigen::MatrixXd> svd(S, Eigen::ComputeThinU);
-    const int rank = static_cast<int>(svd.singularValues().size());
-
-    // Skip index 0 (trivial component, σ ≈ 1.0)
-    const int k = std::min(n_components, rank - 1);
-    if (k < 1)
+    const int want = n_components + 1;  // +1 for the trivial component we'll drop
+    const int rank_cap = std::min(N, J);
+    if (want > rank_cap)
         throw std::runtime_error(
             "cannot extract " + std::to_string(n_components) +
             " MCA components from this data; try a smaller -k value");
 
-    Eigen::MatrixXd U_k = svd.matrixU().middleCols(1, k);      // N × k
-    Eigen::VectorXd s_k = svd.singularValues().segment(1, k);  // k
+    auto svd = randomized_svd(S, want);
+
+    // ---- 5. Drop trivial leading component, build row principal coords. ----
+    Eigen::MatrixXd U_k = svd.U.middleCols(1, n_components);
+    Eigen::VectorXd s_k = svd.s.segment(1, n_components);
 
     MCAResult res;
     res.coords  = dr_inv_sqrt.asDiagonal() * U_k * s_k.asDiagonal();
