@@ -1,6 +1,6 @@
 # DrinkMe
 
-Shrink a multiple sequence alignment to achieve phylogeny reconstruction.
+**Phylogeny reconstruction for massive MSAs via MCA-based dimensionality reduction followed by Ward hierarchical clustering.**
 
 **Pipeline:** FASTA MSA → column cleansing → Multiple Correspondence Analysis → Ward hierarchical clustering → Newick tree
 
