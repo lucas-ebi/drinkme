@@ -2,13 +2,14 @@
 
 Shrink a multiple sequence alignment into a phylogenetic tree.
 
-**Pipeline:** FASTA MSA → Multiple Correspondence Analysis → Ward hierarchical clustering → Newick tree
+**Pipeline:** FASTA MSA → column cleansing → Multiple Correspondence Analysis → Ward hierarchical clustering → Newick tree
 
 ## Method
 
-1. **MCA** — treats each alignment column as a categorical variable and projects sequences into a low-dimensional Euclidean space via SVD of the standardised residual matrix. The trivial first component (σ ≈ 1) is discarded; the next *k* components are retained.
-2. **Ward clustering** — agglomerative clustering minimising within-cluster variance at each merge step. Branch lengths in the output tree equal Ward merge distances.
-3. **Newick output** — written to stdout, ready for any tree viewer (e.g. FigTree, iTOL, ETE3).
+1. **Column cleansing** — drops alignment columns whose gap fraction exceeds `1 - threshold`. Lowercase residues (HMMER insert states) are counted as gaps by default. All input sequences are retained regardless.
+2. **MCA** — treats each surviving column as a categorical variable and projects sequences into a low-dimensional Euclidean space via SVD of the standardised residual matrix. The trivial first component (σ ≈ 1) is discarded; the next *k* components are retained.
+3. **Ward clustering** — agglomerative clustering minimising within-cluster variance at each merge step. Branch lengths in the output tree equal Ward merge distances.
+4. **Newick output** — written to stdout, ready for any tree viewer (e.g. FigTree, iTOL, ETE3).
 
 ## Dependencies
 
@@ -32,6 +33,8 @@ drinkme <alignment.fasta> [options]
 
 Options:
   -k, --components N   MCA dimensions to keep (default: 2)
+  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.9)
+  --keep-lowercase     Treat lowercase residues as valid (not as gaps)
   -v, --verbose        Print diagnostics to stderr
 ```
 

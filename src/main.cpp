@@ -1,15 +1,18 @@
 // drinkme — shrink your MSA into a phylogenetic tree.
 //
 // Pipeline:
-//   FASTA MSA  →  MCA (reduce to k dimensions)
+//   FASTA MSA  →  cleanse columns  →  MCA (reduce to k dimensions)
 //   →  Ward hierarchical clustering  →  Newick tree (stdout)
 //
 // Usage:
 //   drinkme <alignment.fasta> [options]
 //   Options:
 //     -k, --components N    MCA dimensions to keep  (default: 2)
+//     -t, --threshold F     Min non-gap fraction to keep a column (default: 0.9)
+//     --keep-lowercase      Treat lowercase residues as valid (not as gaps)
 //     -v, --verbose         Print diagnostics to stderr
 
+#include "cleanse.hpp"
 #include "fasta.hpp"
 #include "linkage.hpp"
 #include "mca.hpp"
@@ -26,13 +29,17 @@ static void usage(const char* prog) {
         << "Usage: " << prog << " <alignment.fasta> [options]\n"
         << "Options:\n"
         << "  -k, --components N   MCA dimensions to keep (default: 2)\n"
+        << "  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.9)\n"
+        << "  --keep-lowercase     Treat lowercase residues as valid (not as gaps)\n"
         << "  -v, --verbose        Print diagnostics to stderr\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string fasta_path;
-    int  n_components = 2;
-    bool verbose      = false;
+    int    n_components      = 2;
+    double threshold         = 0.9;
+    bool   lowercase_as_gap  = true;
+    bool   verbose           = false;
 
     for (int i = 1; i < argc; ++i) {
         auto eq = [&](const char* a, const char* b) {
@@ -42,6 +49,14 @@ int main(int argc, char* argv[]) {
             if (++i >= argc) { std::cerr << "missing argument for -k\n"; return 1; }
             n_components = std::stoi(argv[i]);
             if (n_components < 1) { std::cerr << "-k must be >= 1\n"; return 1; }
+        } else if (eq("-t", "--threshold")) {
+            if (++i >= argc) { std::cerr << "missing argument for -t\n"; return 1; }
+            threshold = std::stod(argv[i]);
+            if (threshold <= 0.0 || threshold > 1.0) {
+                std::cerr << "-t must be in (0, 1]\n"; return 1;
+            }
+        } else if (std::strcmp(argv[i], "--keep-lowercase") == 0) {
+            lowercase_as_gap = false;
         } else if (eq("-v", "--verbose")) {
             verbose = true;
         } else if (argv[i][0] != '-') {
@@ -67,11 +82,18 @@ int main(int argc, char* argv[]) {
             std::cerr << "[drinkme] loaded " << seqs.size()
                       << " sequences, length " << raw[0].size() << '\n';
 
-        // --- 2. MCA ---
+        // --- 2. Cleanse columns ---
+        auto cl = cleanse_columns(raw, '-', lowercase_as_gap, threshold);
+        if (verbose)
+            std::cerr << "[drinkme] kept " << cl.kept_columns.size()
+                      << "/" << raw[0].size() << " columns (threshold="
+                      << threshold << ")\n";
+
+        // --- 3. MCA ---
         if (verbose)
             std::cerr << "[drinkme] MCA (k=" << n_components << ")...\n";
 
-        auto mca_res = fit_mca(raw, n_components);
+        auto mca_res = fit_mca(cl.seqs, n_components);
 
         if (verbose) {
             double total = mca_res.inertia.sum();
@@ -84,11 +106,11 @@ int main(int argc, char* argv[]) {
             std::cerr << '\n';
         }
 
-        // --- 3. Ward hierarchical clustering ---
+        // --- 4. Ward hierarchical clustering ---
         if (verbose) std::cerr << "[drinkme] Ward clustering...\n";
         auto Z = ward_linkage(mca_res.coords);
 
-        // --- 4. Newick output ---
+        // --- 5. Newick output ---
         if (verbose) std::cerr << "[drinkme] writing Newick tree...\n";
         std::cout << to_newick(Z, names) << '\n';
 
