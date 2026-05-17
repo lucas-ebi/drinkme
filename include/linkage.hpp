@@ -13,8 +13,14 @@
 //   0 .. N-1        leaf nodes (one per input sequence)
 //   N .. 2N-2       internal nodes (merge i → node N+i)
 //   2N-2            root
+//
+// Implementation uses the nearest‑neighbour chain algorithm (O(N²·d) time,
+// O(N·d) memory), which exploits the reducibility of Ward's distance:
+//   d(AB, C) ≥ min(d(A,C), d(B,C))   for all C.
+// This guarantees the same dendrogram as the naive O(N³) scan.
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -49,33 +55,82 @@ inline std::vector<LinkageRow> ward_linkage(const Eigen::MatrixXd& X) {
         return scale * (ctr[a] - ctr[b]).norm();
     };
 
-    std::vector<LinkageRow> result;
-    result.reserve(N - 1);
-    int next = N;
+    // NN‑chain algorithm — discovers merges in chain order, then sorts by height.
+    struct RawMerge {
+        int a, b;          // children (original IDs)
+        double height;
+        int size;
+        int orig_node;     // internal node ID assigned during the chain loop
+    };
+    std::vector<RawMerge> raw_merges;
+    raw_merges.reserve(N - 1);
 
-    for (int step = 0; step < N - 1; ++step) {
-        double best = std::numeric_limits<double>::infinity();
-        int bi = -1, bj = -1;
+    std::vector<int> chain;
+    chain.reserve(N);
+    int next       = N;          // next available internal‑node id
+    int num_active = N;
 
-        for (int i = 0; i < M; ++i) {
-            if (!active[i]) continue;
-            for (int j = i + 1; j < M; ++j) {
-                if (!active[j]) continue;
-                double d = ward_d(i, j);
-                if (d < best) { best = d; bi = i; bj = j; }
-            }
+    while (num_active > 1) {
+        if (chain.empty()) {
+            // Start a new chain from any active cluster
+            for (int i = 0; i < M; ++i)
+                if (active[i]) { chain.push_back(i); break; }
         }
 
-        const int nab = sz[bi] + sz[bj];
-        ctr[next] = (sz[bi] * ctr[bi] + sz[bj] * ctr[bj]) / nab;
-        sz[next]  = nab;
-        active[next] = true;
+        const int top  = chain.back();
+        const int prev = (chain.size() >= 2) ? chain[chain.size() - 2] : -1;
 
-        result.push_back({bi, bj, best, nab});
+        // Nearest neighbour of `top`, tie‑breaking toward `prev`
+        int    nn   = -1;
+        double nn_d = std::numeric_limits<double>::infinity();
+        for (int j = 0; j < M; ++j) {
+            if (!active[j] || j == top) continue;
+            double d = ward_d(top, j);
+            if (d < nn_d || (d == nn_d && j == prev)) { nn = j; nn_d = d; }
+        }
 
-        active[bi] = false;
-        active[bj] = false;
-        ++next;
+        if (nn == prev) {          // reciprocal nearest neighbours → merge
+            chain.pop_back();
+            chain.pop_back();
+
+            // Keep left <= right (purely cosmetic, matches original behavior)
+            int left  = std::min(top, prev);
+            int right = std::max(top, prev);
+
+            const int nab = sz[left] + sz[right];
+            ctr[next]     = (sz[left] * ctr[left] + sz[right] * ctr[right]) / nab;
+            sz[next]      = nab;
+            active[next]  = true;
+            active[left]  = false;
+            active[right] = false;
+
+            raw_merges.push_back({left, right, nn_d, nab, next});
+            ++next;
+            --num_active;
+        } else {
+            chain.push_back(nn);
+        }
+    }
+
+    // Ward guarantees non‑decreasing heights after sorting (valid dendrogram).
+    std::sort(raw_merges.begin(), raw_merges.end(),
+              [](const RawMerge& a, const RawMerge& b) { return a.height < b.height; });
+
+    // Re‑number internal nodes so that the i‑th merge becomes node N+i,
+    // matching the scipy/fastcluster convention.
+    std::vector<int> old_to_new(M, -1);
+    for (int i = 0; i < N; ++i) old_to_new[i] = i;       // leaves stay the same
+    for (int i = 0; i < (int)raw_merges.size(); ++i) {
+        old_to_new[raw_merges[i].orig_node] = N + i;
+    }
+
+    std::vector<LinkageRow> result;
+    result.reserve(N - 1);
+    for (const auto& rm : raw_merges) {
+        int l = rm.a, r = rm.b;
+        if (l >= N) l = old_to_new[l];   // map old internal id → new N+index
+        if (r >= N) r = old_to_new[r];
+        result.push_back({l, r, rm.height, rm.size});
     }
 
     return result;

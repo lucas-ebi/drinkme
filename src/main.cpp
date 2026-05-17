@@ -1,4 +1,4 @@
-// drinkme — shrink your MSA into a phylogenetic tree.
+// DrinkMe – phylogenetic tree from MSA using MCA and Ward hierarchical clustering
 //
 // Pipeline:
 //   FASTA MSA  →  cleanse columns  →  MCA (reduce to k dimensions)
