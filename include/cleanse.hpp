@@ -16,7 +16,6 @@ struct CleanseResult {
 
 inline CleanseResult cleanse_columns(
     const std::vector<std::string>& seqs,
-    char   indel           = '-',
     bool   lowercase_as_gap = true,
     double threshold        = 0.5)
 {
@@ -25,7 +24,7 @@ inline CleanseResult cleanse_columns(
     const int L = static_cast<int>(seqs[0].size());
 
     auto is_gap = [&](char c) -> bool {
-        if (c == indel) return true;
+        if (c == '-' || c == '.') return true;
         if (lowercase_as_gap && std::islower(static_cast<unsigned char>(c))) return true;
         return false;
     };
@@ -49,9 +48,11 @@ inline CleanseResult cleanse_columns(
     std::vector<std::string> out(N);
     for (int i = 0; i < N; ++i) {
         out[i].reserve(kept.size());
-        for (int col : kept)
-            out[i] += static_cast<char>(std::toupper(
+        for (int col : kept) {
+            char ch = static_cast<char>(std::toupper(
                 static_cast<unsigned char>(seqs[i][col])));
+            out[i] += is_gap(seqs[i][col]) ? '-' : ch;
+        }
     }
 
     return {std::move(out), std::move(kept)};

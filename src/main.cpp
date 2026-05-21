@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
 
         auto t1 = clk::now();
 
-        auto cl = cleanse_columns(raw, gap_char, lowercase_as_gap, threshold);
+        auto cl = cleanse_columns(raw, lowercase_as_gap, threshold);
         if (verbose)
             std::cerr << "[drinkme] kept " << cl.kept_columns.size()
                       << "/" << raw[0].size() << " columns (threshold=" << threshold << ")\n";
