@@ -67,3 +67,14 @@ A single Newick string on stdout, e.g.:
 ```
 
 Labels containing Newick-reserved characters (spaces, parentheses, colons, etc.) are automatically single-quoted.
+
+## Citation
+
+If you use this tool in your research, please cite the original software and the associated publication (if any). The original module was developed by **Lucas Carrijo de Oliveira** (<lucas@ebi.ac.uk>). For now, you may reference the repository directly:
+
+```text
+Lucas C. de Oliveira. DrinkMe. 2026.
+https://github.com/lucas-ebi/drinkme
+```
+
+A formal publication is in preparation; check the repository for updates.
