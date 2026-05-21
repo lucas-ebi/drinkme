@@ -1,13 +1,12 @@
 // DrinkMe – hierarchical clustering of MSAs using MCA + Ward linkage.
 //
-// Agglomerative (default): global MCA → Ward dendrogram → Newick tree (stdout)
-// Divisive (--mode divisive): recursively bisects via local MCA at each level.
+// Pipeline: FASTA MSA → column cleansing → cardinality-normalised MCA
+//           → Ward dendrogram → Newick tree (stdout)
 //
 // Usage:
 //   drinkme <alignment.fasta> [options]
 
 #include "agglomerative.hpp"
-#include "divisive.hpp"
 #include "fasta.hpp"
 
 #include <chrono>
@@ -24,8 +23,6 @@ static void usage(const char* prog) {
         << "  -k, --components N   MCA dimensions to keep (default: 2)\n"
         << "  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)\n"
         << "  --keep-lowercase     Treat lowercase residues as valid (not as gaps)\n"
-        << "  -m, --mode STR       Clustering mode: agglomerative (default) or divisive\n"
-        << "  -s, --stop-size N    (divisive) Stop recursing at clusters <= N seqs (default: 3)\n"
         << "  -v, --verbose        Print diagnostics to stderr\n";
 }
 
@@ -34,8 +31,6 @@ int main(int argc, char* argv[]) {
     int         n_components     = 2;
     double      threshold        = 0.5;
     bool        lowercase_as_gap = true;
-    std::string mode             = "agglomerative";
-    int         stop_size        = 3;
     bool        verbose          = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -54,16 +49,6 @@ int main(int argc, char* argv[]) {
             }
         } else if (std::strcmp(argv[i], "--keep-lowercase") == 0) {
             lowercase_as_gap = false;
-        } else if (eq("-m", "--mode")) {
-            if (++i >= argc) { std::cerr << "missing argument for --mode\n"; return 1; }
-            mode = argv[i];
-            if (mode != "agglomerative" && mode != "divisive") {
-                std::cerr << "--mode must be 'agglomerative' or 'divisive'\n"; return 1;
-            }
-        } else if (eq("-s", "--stop-size")) {
-            if (++i >= argc) { std::cerr << "missing argument for -s\n"; return 1; }
-            stop_size = std::stoi(argv[i]);
-            if (stop_size < 1) { std::cerr << "-s must be >= 1\n"; return 1; }
         } else if (eq("-v", "--verbose")) {
             verbose = true;
         } else if (argv[i][0] != '-') {
@@ -96,16 +81,8 @@ int main(int argc, char* argv[]) {
                       << " sequences, length " << raw[0].size() << '\n';
 
         auto t1 = clk::now();
-        if (mode == "divisive") {
-            if (verbose)
-                std::cerr << "[drinkme] mode=divisive, stop-size=" << stop_size << '\n';
-            std::cout << divisive_newick(raw, names, '-', lowercase_as_gap,
-                                         threshold, n_components, stop_size, verbose)
-                      << ";\n";
-        } else {
-            std::cout << agglomerative_newick(raw, names, '-', lowercase_as_gap,
-                                              threshold, n_components, verbose) << '\n';
-        }
+        std::cout << agglomerative_newick(raw, names, '-', lowercase_as_gap,
+                                          threshold, n_components, verbose) << '\n';
 
         if (verbose)
             std::cerr << "[drinkme] total=" << elapsed(t0, clk::now()) << "ms"

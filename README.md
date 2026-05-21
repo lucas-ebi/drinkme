@@ -78,6 +78,32 @@ The leading singular triple (with $\sigma_1 \approx 1$, corresponding to the gra
 
 where $\mathbf{U}_k$ comprises columns $2, \ldots, k+1$ of $\mathbf{U}$ and $\boldsymbol{\Sigma}_k = \operatorname{diag}(\sigma_2, \ldots, \sigma_{k+1})$.
 
+**Cardinality normalisation.** Standard MCA assigns each column $j$ a total chi-square weight proportional to $Q_j = |\mathcal{A}_j|$: the contribution of column $j$'s block to the Frobenius norm of $\mathbf{S}$ is
+
+```math
+\sum_{\alpha \in \mathcal{A}_j} \frac{1}{c_{j\alpha}} \cdot c_{j\alpha} \;=\; Q_j.
+```
+
+Noise or marginal columns with large alphabets therefore dominate subfamily-discriminating (SDP) columns with small alphabets when uninformative positions are numerous. To equalise contributions, each column's block in $\mathbf{D}_c^{-1/2}$ and $\sqrt{\mathbf{c}}$ is rescaled by $w_j = Q_j^{-1/2}$:
+
+```math
+\tilde{d}_{c,\,\text{off}(j)+\alpha}^{-1/2}
+  = \frac{1}{\sqrt{Q_j\, c_{j\alpha}}}
+\quad \forall\, \alpha \in \mathcal{A}_j,
+```
+
+so every column contributes a unit total weight to the chi-square metric. Equivalently, the SVD is applied to the weighted residual operator
+
+```math
+\mathbf{S}_w = \mathbf{D}_r^{-1/2}
+\!\left(\frac{\mathbf{Z}}{T} - \mathbf{r}\mathbf{c}^\top\right)
+\mathbf{W}\,\mathbf{D}_c^{-1/2},
+\qquad
+W_{\text{off}(j)+\alpha,\,\text{off}(j)+\alpha} = Q_j^{-1/2},
+```
+
+where $\mathbf{W}$ is absorbed into the precomputed scaling vectors so the implicit matvec structure is unchanged.
+
 ### Ward hierarchical clustering
 
 **Merge distance.** For clusters $A$ and $B$ with sizes $n_A$, $n_B$ and centroids $\mathbf{c}_A$, $\mathbf{c}_B$ in $\mathbf{F}$-space:
@@ -148,28 +174,12 @@ Options:
   -k, --components N   MCA dimensions to keep (default: 2)
   -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)
   --keep-lowercase     Treat lowercase residues as valid (not as gaps)
-  -m, --mode STR       Clustering mode: agglomerative (default) or divisive
-  -s, --stop-size N    (divisive) Stop recursing at clusters <= N sequences (default: 3)
   -v, --verbose        Print diagnostics to stderr
 ```
-
-### Agglomerative mode (default)
-
-Global MCA on all sequences followed by a single Ward dendrogram.
 
 ```bash
 ./build/drinkme sequences.fasta -k 4 -v > tree.nwk
 ```
-
-### Divisive mode
-
-Recursively bisects the alignment: at each level, MCA and Ward clustering are applied to the local subset, the root split defines two groups, and the procedure recurses on each group until it reaches clusters of at most `--stop-size` sequences. Because each level performs its own column cleansing and MCA, dimensionality reduction is context-aware at every split.
-
-```bash
-./build/drinkme sequences.fasta --mode divisive --stop-size 5 -k 4 -v > tree.nwk
-```
-
-Branch lengths in divisive mode represent the Ward root-merge distance in the local MCA space at each split and are not globally comparable across levels.
 
 ## Output
 

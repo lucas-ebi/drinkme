@@ -10,9 +10,14 @@
 // Pipeline:
 //   1. Build sparse indicator matrix Z (N × J) — exactly N·L non-zeros.
 //   2. Compute row/column masses; never form P, rcᵀ, or S explicitly.
-//   3. S is applied implicitly as a sparse matvec minus a rank-1 correction:
-//        S      x  =  Dr^{-½} (Z/total) Dc^{-½} x  −  √r (√cᵀ x)
-//        Sᵀ     y  =  Dc^{-½} (Zᵀ/total) Dr^{-½} y  −  √c (√rᵀ y)
+//   3. Compute Dc^{-½} and √c from column masses, then apply cardinality
+//      normalisation: scale column j's block by 1/√Qⱼ (Qⱼ = alphabet size)
+//      so every column contributes equally to the chi-square metric.
+//      Without this, high-cardinality noise columns dominate SDP columns.
+//      The weighted operator Sw is applied implicitly:
+//        Sw     x  =  Dr^{-½} (Z/total) W̃Dc^{-½} x  −  √r (W̃√cᵀ x)
+//        Swᵀ    y  =  W̃Dc^{-½} (Zᵀ/total) Dr^{-½} y  −  W̃√c (√rᵀ y)
+//      where W̃ absorbs the per-column 1/√Qⱼ factors into dc_inv_sqrt/√c.
 //   4. Randomized SVD (Halko–Martinsson–Tropp, 2011) extracts top k+1
 //      singular triples in O((nnz(Z) + N + J) · (k+p) · iters) time.
 //   5. Trivial σ ≈ 1 component is dropped; row principal coords returned.
@@ -186,6 +191,22 @@ inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components 
     for (int j = 0; j < J; ++j) {
         sqrt_c(j)      = std::sqrt(c_mass(j));
         dc_inv_sqrt(j) = (c_mass(j) > 1e-14) ? 1.0 / sqrt_c(j) : 0.0;
+    }
+
+    // ---- 3b. Cardinality normalisation. ------------------------------------
+    // Scale column j's block by 1/sqrt(Q_j) so every column contributes
+    // equally to the chi-square metric regardless of alphabet size.
+    // Without this, high-cardinality columns (noise/marginal positions with
+    // many rare characters) dominate over low-cardinality SDP columns.
+    for (int col = 0; col < L; ++col) {
+        const int q_j = off[col + 1] - off[col];
+        if (q_j <= 1) continue;
+        const double w = 1.0 / std::sqrt(static_cast<double>(q_j));
+        for (int a = 0; a < q_j; ++a) {
+            const int idx = off[col] + a;
+            dc_inv_sqrt(idx) *= w;
+            sqrt_c(idx)      *= w;
+        }
     }
 
     // ---- 4. Implicit operator + randomized truncated SVD. ------------------
