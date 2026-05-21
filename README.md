@@ -148,14 +148,28 @@ Options:
   -k, --components N   MCA dimensions to keep (default: 2)
   -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)
   --keep-lowercase     Treat lowercase residues as valid (not as gaps)
+  -m, --mode STR       Clustering mode: agglomerative (default) or divisive
+  -s, --stop-size N    (divisive) Stop recursing at clusters <= N sequences (default: 3)
   -v, --verbose        Print diagnostics to stderr
 ```
 
-### Example
+### Agglomerative mode (default)
+
+Global MCA on all sequences followed by a single Ward dendrogram.
 
 ```bash
 ./build/drinkme sequences.fasta -k 4 -v > tree.nwk
 ```
+
+### Divisive mode
+
+Recursively bisects the alignment: at each level, MCA and Ward clustering are applied to the local subset, the root split defines two groups, and the procedure recurses on each group until it reaches clusters of at most `--stop-size` sequences. Because each level performs its own column cleansing and MCA, dimensionality reduction is context-aware at every split.
+
+```bash
+./build/drinkme sequences.fasta --mode divisive --stop-size 5 -k 4 -v > tree.nwk
+```
+
+Branch lengths in divisive mode represent the Ward root-merge distance in the local MCA space at each split and are not globally comparable across levels.
 
 ## Output
 

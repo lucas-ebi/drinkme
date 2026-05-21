@@ -1,22 +1,14 @@
-// DrinkMe – phylogenetic tree from MSA using MCA and Ward hierarchical clustering
+// DrinkMe – hierarchical clustering of MSAs using MCA + Ward linkage.
 //
-// Pipeline:
-//   FASTA MSA  →  cleanse columns  →  MCA (reduce to k dimensions)
-//   →  Ward hierarchical clustering  →  Newick tree (stdout)
+// Agglomerative (default): global MCA → Ward dendrogram → Newick tree (stdout)
+// Divisive (--mode divisive): recursively bisects via local MCA at each level.
 //
 // Usage:
 //   drinkme <alignment.fasta> [options]
-//   Options:
-//     -k, --components N    MCA dimensions to keep  (default: 2)
-//     -t, --threshold F     Min non-gap fraction to keep a column (default: 5)
-//     --keep-lowercase      Treat lowercase residues as valid (not as gaps)
-//     -v, --verbose         Print diagnostics to stderr
 
-#include "cleanse.hpp"
+#include "agglomerative.hpp"
+#include "divisive.hpp"
 #include "fasta.hpp"
-#include "linkage.hpp"
-#include "mca.hpp"
-#include "newick.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -32,15 +24,19 @@ static void usage(const char* prog) {
         << "  -k, --components N   MCA dimensions to keep (default: 2)\n"
         << "  -t, --threshold F    Min non-gap fraction to keep a column (default: 0.5)\n"
         << "  --keep-lowercase     Treat lowercase residues as valid (not as gaps)\n"
+        << "  -m, --mode STR       Clustering mode: agglomerative (default) or divisive\n"
+        << "  -s, --stop-size N    (divisive) Stop recursing at clusters <= N seqs (default: 3)\n"
         << "  -v, --verbose        Print diagnostics to stderr\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string fasta_path;
-    int    n_components      = 2;
-    double threshold         = 0.5;
-    bool   lowercase_as_gap  = true;
-    bool   verbose           = false;
+    int         n_components     = 2;
+    double      threshold        = 0.5;
+    bool        lowercase_as_gap = true;
+    std::string mode             = "agglomerative";
+    int         stop_size        = 3;
+    bool        verbose          = false;
 
     for (int i = 1; i < argc; ++i) {
         auto eq = [&](const char* a, const char* b) {
@@ -58,6 +54,16 @@ int main(int argc, char* argv[]) {
             }
         } else if (std::strcmp(argv[i], "--keep-lowercase") == 0) {
             lowercase_as_gap = false;
+        } else if (eq("-m", "--mode")) {
+            if (++i >= argc) { std::cerr << "missing argument for --mode\n"; return 1; }
+            mode = argv[i];
+            if (mode != "agglomerative" && mode != "divisive") {
+                std::cerr << "--mode must be 'agglomerative' or 'divisive'\n"; return 1;
+            }
+        } else if (eq("-s", "--stop-size")) {
+            if (++i >= argc) { std::cerr << "missing argument for -s\n"; return 1; }
+            stop_size = std::stoi(argv[i]);
+            if (stop_size < 1) { std::cerr << "-s must be >= 1\n"; return 1; }
         } else if (eq("-v", "--verbose")) {
             verbose = true;
         } else if (argv[i][0] != '-') {
@@ -78,7 +84,6 @@ int main(int argc, char* argv[]) {
             return std::chrono::duration_cast<ms>(b - a).count();
         };
 
-        // --- 1. Parse alignment ---
         auto t0   = clk::now();
         auto seqs = parse_fasta(fasta_path);
         std::vector<std::string> names, raw;
@@ -90,52 +95,21 @@ int main(int argc, char* argv[]) {
             std::cerr << "[drinkme] loaded " << seqs.size()
                       << " sequences, length " << raw[0].size() << '\n';
 
-        // --- 2. Cleanse columns ---
         auto t1 = clk::now();
-        auto cl = cleanse_columns(raw, '-', lowercase_as_gap, threshold);
-        if (verbose)
-            std::cerr << "[drinkme] kept " << cl.kept_columns.size()
-                      << "/" << raw[0].size() << " columns (threshold="
-                      << threshold << ")\n";
-
-        // --- 3. MCA ---
-        auto t2 = clk::now();
-        if (verbose)
-            std::cerr << "[drinkme] MCA (k=" << n_components << ")...\n";
-
-        auto mca_res = fit_mca(cl.seqs, n_components);
-
-        if (verbose) {
-            double total = mca_res.inertia.sum();
-            std::cerr << "[drinkme] inertia per component:";
-            for (int i = 0; i < mca_res.inertia.size(); ++i) {
-                double pct = 100.0 * mca_res.inertia(i) / total;
-                std::cerr << "  dim" << (i + 1) << "=" << mca_res.inertia(i)
-                          << " (" << std::fixed << std::setprecision(1) << pct << "%)";
-            }
-            std::cerr << '\n';
+        if (mode == "divisive") {
+            if (verbose)
+                std::cerr << "[drinkme] mode=divisive, stop-size=" << stop_size << '\n';
+            std::cout << divisive_newick(raw, names, '-', lowercase_as_gap,
+                                         threshold, n_components, stop_size, verbose)
+                      << ";\n";
+        } else {
+            std::cout << agglomerative_newick(raw, names, '-', lowercase_as_gap,
+                                              threshold, n_components, verbose) << '\n';
         }
 
-        // --- 4. Ward hierarchical clustering ---
-        auto t3 = clk::now();
-        if (verbose) std::cerr << "[drinkme] Ward clustering...\n";
-        auto Z = ward_linkage(mca_res.coords);
-
-        // --- 5. Newick output ---
-        auto t4 = clk::now();
-        if (verbose) std::cerr << "[drinkme] writing Newick tree...\n";
-        std::cout << to_newick(Z, names) << '\n';
-
-        if (verbose) {
-            auto t5 = clk::now();
-            std::cerr << "[drinkme] timings (ms):"
-                      << "  parse="   << elapsed(t0, t1)
-                      << "  cleanse=" << elapsed(t1, t2)
-                      << "  mca="     << elapsed(t2, t3)
-                      << "  ward="    << elapsed(t3, t4)
-                      << "  newick="  << elapsed(t4, t5)
-                      << "  total="   << elapsed(t0, t5) << '\n';
-        }
+        if (verbose)
+            std::cerr << "[drinkme] total=" << elapsed(t0, clk::now()) << "ms"
+                      << "  parse=" << elapsed(t0, t1) << "ms\n";
 
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
