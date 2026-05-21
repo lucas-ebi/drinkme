@@ -1,7 +1,8 @@
 #pragma once
 // Agglomerative (bottom-up) hierarchical clustering for MSA Newick generation.
 //
-// Pipeline: column cleansing → MCA (global) → Ward dendrogram → Newick tree.
+// Pipeline: column cleansing → H&H sequence weighting → three-layer column weighting
+//           → MCA (global) → Ward dendrogram → Newick tree.
 
 #include "cleanse.hpp"
 #include "linkage.hpp"
@@ -28,7 +29,7 @@ inline std::string agglomerative_newick(
                   << "/" << raw_seqs[0].size() << " columns (threshold=" << threshold << ")\n";
 
     if (verbose) std::cerr << "[drinkme] MCA (k=" << n_components << ")...\n";
-    auto mca_res = fit_mca(cl.seqs, n_components);
+    auto mca_res = fit_mca(cl.seqs, n_components, gap_char);
     if (verbose) {
         double total = mca_res.inertia.sum();
         std::cerr << "[drinkme] inertia per component:";

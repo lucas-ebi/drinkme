@@ -4,7 +4,7 @@
 
 The name is a nod to Alice in Wonderland: just as the "Drink Me" potion makes Alice small enough to pass through the tiny door, DrinkMe compresses a high-dimensional categorical alignment — potentially thousands of sequences over hundreds of columns — into a compact continuous coordinate space, making large-scale hierarchical clustering tractable. The key step is Multiple Correspondence Analysis (MCA), which projects each sequence from the $N \times J$ binary indicator space (where $J$ can be in the thousands) down to $k$ principal dimensions (typically 2–10), before Ward linkage is applied. This means pairwise distances are never computed in the original space: clustering operates entirely on the low-dimensional MCA coordinates.
 
-**Pipeline:** FASTA MSA → column cleansing → Multiple Correspondence Analysis (shrink to $k$ dimensions) → Ward hierarchical clustering → Newick tree
+**Pipeline:** FASTA MSA → column cleansing → H&H sequence weighting → cardinality + entropy + CV column weighting → Multiple Correspondence Analysis (shrink to $k$ dimensions) → Ward hierarchical clustering → Newick tree
 
 ## Method
 
@@ -24,22 +24,31 @@ where $\theta$ is `--threshold` (default 0.5). Lowercase residues are treated as
 
 ### Multiple Correspondence Analysis
 
-**Binary indicator matrix.** The $N \times J$ binary matrix $\mathbf{Z}$ has exactly $N \cdot L$ non-zeros, one per alignment cell:
+**Sequence weighting (Henikoff & Henikoff 1994).** Over-represented sequence clusters would dominate the MCA by sheer count, biasing the principal coordinates towards the majority subfamily. To correct for this without requiring an explicit identity threshold, each sequence $i$ is assigned a positional weight
 
 ```math
-Z_{i,\,\text{off}(j)+\alpha} = 1
+w_i = \frac{1}{L}\sum_{j\,:\,s_{ij}\neq\text{gap}} \frac{1}{k_j\, c_{ij}},
+\qquad \sum_i w_i = 1,
+```
+
+where $k_j$ is the number of distinct non-gap characters in column $j$ and $c_{ij}$ is the count of sequences carrying the same character as $i$ at column $j$. A sequence that shares a rare character with few others (small $c_{ij}$) at a diverse column (large $k_j$) receives a larger weight contribution; redundant clusters — where many sequences agree and $c_{ij}$ is large — are automatically downweighted.
+
+**Binary indicator matrix.** The $N \times J$ matrix $\mathbf{Z}$ has exactly $N \cdot L$ non-zeros, one per alignment cell:
+
+```math
+Z_{i,\,\text{off}(j)+\alpha} = N w_i
 \quad \text{if sequence } i \text{ carries character } \alpha \in \mathcal{A}_j \text{ at column } j.
 ```
+
+Setting $Z_{ij} = N w_i$ (rather than $1$) keeps the total $T = NL$ unchanged and preserves the structure of the rank-1 correction; row masses become $r_i = w_i$ automatically.
 
 **Row and column masses.** With total weight $T = NL$:
 
 ```math
-r_i = \frac{1}{T}\sum_j Z_{ij} = \frac{1}{N},
+r_i = \frac{1}{T}\sum_j Z_{ij} = w_i,
 \qquad
 c_j = \frac{1}{T}\sum_i Z_{ij}.
 ```
-
-Row masses are uniform because each sequence contributes exactly one character per column.
 
 **Standardised residual operator.** The $N \times J$ matrix
 
@@ -78,31 +87,65 @@ The leading singular triple (with $\sigma_1 \approx 1$, corresponding to the gra
 
 where $\mathbf{U}_k$ comprises columns $2, \ldots, k+1$ of $\mathbf{U}$ and $\boldsymbol{\Sigma}_k = \operatorname{diag}(\sigma_2, \ldots, \sigma_{k+1})$.
 
-**Cardinality normalisation.** Standard MCA assigns each column $j$ a total chi-square weight proportional to $Q_j = |\mathcal{A}_j|$: the contribution of column $j$'s block to the Frobenius norm of $\mathbf{S}$ is
+**Column weighting.** Three multiplicative layers are applied to the scaling vectors $\mathbf{D}_c^{-1/2}$ and $\sqrt{\mathbf{c}}$ for each column $j$:
 
-```math
-\sum_{\alpha \in \mathcal{A}_j} \frac{1}{c_{j\alpha}} \cdot c_{j\alpha} \;=\; Q_j.
-```
+| Layer | Weight | Effect |
+| --- | --- | --- |
+| Cardinality | $w_j^{(a)} = Q_j^{-1/2}$ | Equalises chi-square contribution across alphabet sizes |
+| Gap-aware entropy | $w_j^{(b)} = \exp(-S_j)$ | Downweights high-entropy and gap-rich columns |
+| Frequency CV | $w_j^{(c)} = \operatorname{std}_{20}(\mathbf{p}_j) \;/\; (1/20)$ | Upweights columns with residues concentrated relative to flat background |
 
-Noise or marginal columns with large alphabets therefore dominate subfamily-discriminating (SDP) columns with small alphabets when uninformative positions are numerous. To equalise contributions, each column's block in $\mathbf{D}_c^{-1/2}$ and $\sqrt{\mathbf{c}}$ is rescaled by $w_j = Q_j^{-1/2}$:
-
-```math
-\tilde{d}_{c,\,\text{off}(j)+\alpha}^{-1/2}
-  = \frac{1}{\sqrt{Q_j\, c_{j\alpha}}}
-\quad \forall\, \alpha \in \mathcal{A}_j,
-```
-
-so every column contributes a unit total weight to the chi-square metric. Equivalently, the SVD is applied to the weighted residual operator
+The combined per-column weight is $w_j = w_j^{(a)} w_j^{(b)} w_j^{(c)}$. Columns with $Q_j \leq 1$ are left unscaled. The SVD is therefore applied to the weighted residual operator
 
 ```math
 \mathbf{S}_w = \mathbf{D}_r^{-1/2}
 \!\left(\frac{\mathbf{Z}}{T} - \mathbf{r}\mathbf{c}^\top\right)
 \mathbf{W}\,\mathbf{D}_c^{-1/2},
 \qquad
-W_{\text{off}(j)+\alpha,\,\text{off}(j)+\alpha} = Q_j^{-1/2},
+W_{\text{off}(j)+\alpha,\,\text{off}(j)+\alpha} = w_j,
 ```
 
 where $\mathbf{W}$ is absorbed into the precomputed scaling vectors so the implicit matvec structure is unchanged.
+
+**Cardinality layer.** Standard MCA assigns column $j$ a total chi-square weight proportional to $Q_j = |\mathcal{A}_j^{\text{non-gap}}|$: the contribution of column $j$'s block to the Frobenius norm of $\mathbf{S}$ is $\sum_{\alpha} c_{j\alpha}^{-1} \cdot c_{j\alpha} = Q_j$. Noise columns with large alphabets therefore dominate subfamily-discriminating (SDP) columns with small alphabets. The weight $w_j^{(a)} = Q_j^{-1/2}$ equalises this contribution so every column carries unit total chi-square weight.
+
+**Gap-corrected Shannon entropy.** Without a gap correction, a column where most sequences carry a gap can appear spuriously informative: the few observed residues may happen to agree, and the column's low raw entropy would be rewarded with a high weight. To penalise gap-rich columns correctly, entropy is defined over the full column including gaps, with the gap mass mapped to its maximum-uncertainty equivalent.
+
+Let $g_j$ be the weighted gap fraction at column $j$, and let $p_{j\alpha}$ be the weighted frequency of residue $\alpha$ relative to all sequences (gaps included), so $\sum_\alpha p_{j\alpha} = 1 - g_j$. Define $\tilde{p}_{j\alpha} = p_{j\alpha} / (1 - g_j)$ as the residue distribution conditioned on non-gap sequences ($\sum_\alpha \tilde{p}_{j\alpha} = 1$). The actual Shannon entropy of the non-gap part is
+
+```math
+H^\text{actual}_j = -\sum_\alpha p_{j\alpha} \ln p_{j\alpha}.
+```
+
+A reference column with the same gap fraction $g_j$ but maximally uncertain non-gap content — residues distributed uniformly over all 20 amino acids — has entropy
+
+```math
+H^\text{ref}_j = -(1-g_j)\ln\frac{1-g_j}{20}.
+```
+
+Shifting $H^\text{actual}_j$ so that a reference column maps to exactly $\ln 20$ (the maximum possible uncertainty) gives the gap-corrected score
+
+```math
+S_j = H^\text{actual}_j + \bigl(\ln 20 - H^\text{ref}_j\bigr).
+```
+
+Substituting $p_{j\alpha} = (1-g_j)\tilde{p}_{j\alpha}$ and expanding $H^\text{actual}_j$ yields $-(1-g_j)\ln(1-g_j) + (1-g_j)\,H(\tilde{\mathbf{p}}_j)$; expanding $H^\text{ref}_j$ yields $(1-g_j)\ln(1-g_j) - (1-g_j)\ln 20$. The $(1-g_j)\ln(1-g_j)$ terms cancel, leaving
+
+```math
+S_j = g_j\ln 20 + (1-g_j)\,H(\tilde{\mathbf{p}}_j),
+\qquad H(\tilde{\mathbf{p}}_j) = -\sum_\alpha \tilde{p}_{j\alpha}\ln\tilde{p}_{j\alpha}.
+```
+
+A fully conserved, gap-free column gives $S_j = 0$ and $w_j^{(b)} = 1$ (maximum weight); a fully gapped column or a uniformly distributed column gives $S_j = \ln 20$ and $w_j^{(b)} = 1/20$ (minimum weight).
+
+**Frequency CV layer.** The coefficient of variation of residue frequencies relative to a flat background rewards columns where a small number of residues dominate. For each column $j$, let $p_{j\alpha}^{(20)}$ be the weighted frequency of amino acid $\alpha$ across the standard 20-letter alphabet (zero for absent residues). Then
+
+```math
+w_j^{(c)} = \frac{\operatorname{std}_{20}(\mathbf{p}_j)}{1/20},
+\qquad \operatorname{std}_{20}(\mathbf{p}_j) = \sqrt{\frac{1}{20}\sum_{\alpha=1}^{20}\!\left(p_{j\alpha}^{(20)} - \tfrac{1}{20}\right)^2}.
+```
+
+A column concentrated on a single residue (SDP-like) deviates strongly from the flat background; a column with frequencies spread uniformly over many residues deviates little.
 
 ### Ward hierarchical clustering
 
@@ -133,8 +176,10 @@ The procedure runs in $O(N^2 k)$ time and $O(Nk)$ memory, producing the same den
 ### References
 
 - Halko N, Martinsson PG, Tropp JA. (2011). Finding structure with randomness: probabilistic algorithms for constructing approximate matrix decompositions. *SIAM Rev*, 53(2), 217–288. <https://doi.org/10.1137/090771806>
-- Ward JH. (1963). Hierarchical grouping to optimize an objective function. *J Am Stat Assoc*, 58(301), 236–244. <https://doi.org/10.1080/01621459.1963.10500845>
+- Henikoff S, Henikoff JG. (1994). Position-based sequence weights. *J Mol Biol*, 243(4), 574–578. <https://doi.org/10.1016/0022-2836(94)90032-9>
 - Murtagh F. (1983). A survey of recent advances in hierarchical clustering algorithms. *Comput J*, 26(4), 354–359. <https://doi.org/10.1093/comjnl/26.4.354>
+- Shannon CE. (1948). A mathematical theory of communication. *Bell Syst Tech J*, 27(3), 379–423. <https://doi.org/10.1002/j.1538-7305.1948.tb01338.x>
+- Ward JH. (1963). Hierarchical grouping to optimize an objective function. *J Am Stat Assoc*, 58(301), 236–244. <https://doi.org/10.1080/01621459.1963.10500845>
 
 ## Performance
 

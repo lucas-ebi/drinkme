@@ -8,19 +8,24 @@
 // component is discarded, as in standard MCA.
 //
 // Pipeline:
-//   1. Build sparse indicator matrix Z (N × J) — exactly N·L non-zeros.
-//   2. Compute row/column masses; never form P, rcᵀ, or S explicitly.
-//   3. Compute Dc^{-½} and √c from column masses, then apply cardinality
-//      normalisation: scale column j's block by 1/√Qⱼ (Qⱼ = alphabet size)
-//      so every column contributes equally to the chi-square metric.
-//      Without this, high-cardinality noise columns dominate SDP columns.
-//      The weighted operator Sw is applied implicitly:
+//   1. Build per-column alphabets.  Henikoff & Henikoff (1994) sequence weights
+//      wᵢ are computed from per-column non-gap character diversity; Z entries
+//      are set to N·wᵢ (total = N·L unchanged, row masses = wᵢ) to down-weight
+//      sequences from over-represented clusters.
+//   2. Build sparse Z (N × J) — exactly N·L non-zeros (H&H weighted).
+//   3. Compute masses; apply three-layer column normalisation absorbed into
+//      dc_inv_sqrt and √c (all multiplicative):
+//        (a) Cardinality  1/√Qⱼ  — equalises Qⱼ-proportional chi-square bias.
+//        (b) Gap-aware entropy  exp(−Sⱼ),  Sⱼ = gⱼ·ln20 + (1−gⱼ)·H(p̃ⱼ)
+//            — penalises high-entropy and gap-rich columns.
+//        (c) CV  std(pⱼ over 20 standard AAs) / (1/20)
+//            — rewards character concentration relative to random.
+//      Combined SDP(Q=3) vs noise(Q=12) contrast: ~23× vs ~2× for (a) alone.
+//   4. Weighted operator Sw is applied implicitly:
 //        Sw     x  =  Dr^{-½} (Z/total) W̃Dc^{-½} x  −  √r (W̃√cᵀ x)
 //        Swᵀ    y  =  W̃Dc^{-½} (Zᵀ/total) Dr^{-½} y  −  W̃√c (√rᵀ y)
-//      where W̃ absorbs the per-column 1/√Qⱼ factors into dc_inv_sqrt/√c.
-//   4. Randomized SVD (Halko–Martinsson–Tropp, 2011) extracts top k+1
-//      singular triples in O((nnz(Z) + N + J) · (k+p) · iters) time.
-//   5. Trivial σ ≈ 1 component is dropped; row principal coords returned.
+//   5. Randomized SVD extracts top k+1 singular triples in O(N·L·k) time.
+//   6. Trivial σ ≈ 1 component is dropped; row principal coords returned.
 //
 // Memory: O(N·L) for Z, plus O((N+J)·(k+p)) workspace.  No dense N×J matrix
 // is ever allocated, so this scales to MSAs that wouldn't fit otherwise.
@@ -129,7 +134,9 @@ inline TruncatedSVD randomized_svd(const SOperator& op,
 
 }  // namespace mca_detail
 
-inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components = 2) {
+inline MCAResult fit_mca(const std::vector<std::string>& seqs,
+                         int  n_components = 2,
+                         char gap_char     = '-') {
     using namespace mca_detail;
 
     if (seqs.empty()) throw std::runtime_error("empty sequence set");
@@ -137,16 +144,16 @@ inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components 
     const int L = static_cast<int>(seqs[0].size());
     if (L == 0) throw std::runtime_error("zero-length sequences");
 
+    const int gap_uc = static_cast<unsigned char>(gap_char);
+
     // ---- 1. Per-column alphabet via O(1) char lookup tables. ---------------
     std::vector<std::array<int, 256>> lookup(L);
     for (auto& tbl : lookup) tbl.fill(-1);
     std::vector<int> off(L + 1, 0);
 
     for (int col = 0; col < L; ++col) {
-        // First pass: mark observed characters.
         std::array<bool, 256> seen{};
         for (const auto& s : seqs) seen[static_cast<unsigned char>(s[col])] = true;
-        // Assign indices in sorted character order (stable, reproducible).
         int idx = 0;
         for (int ch = 0; ch < 256; ++ch)
             if (seen[ch]) lookup[col][ch] = idx++;
@@ -154,15 +161,54 @@ inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components 
     }
     const int J = off[L];
 
-    // ---- 2. Build sparse Z (N × J) — exactly N·L non-zeros. ---------------
+    // ---- 1b. Henikoff & Henikoff (1994) sequence weights. ------------------
+    // cnt[col][alpha_idx] = count of sequences with that char at col (all chars).
+    // k_j = distinct non-gap chars per column.
+    std::vector<std::vector<int>> cnt(L);
+    std::vector<int> k_j(L, 0);
+    for (int col = 0; col < L; ++col) {
+        const int q_total = off[col + 1] - off[col];
+        cnt[col].assign(q_total, 0);
+        for (const auto& s : seqs)
+            cnt[col][lookup[col][static_cast<unsigned char>(s[col])]]++;
+        const int gap_idx = lookup[col][gap_uc];
+        k_j[col] = q_total - (gap_idx >= 0 ? 1 : 0);
+    }
+
+    // w[i] = (1/L) Σ_{non-gap j} 1/(k_j · c_{ij});  Σ w_i = 1 exactly.
+    std::vector<double> hh_w(N, 0.0);
+    for (int i = 0; i < N; ++i) {
+        for (int col = 0; col < L; ++col) {
+            const int ch = static_cast<unsigned char>(seqs[i][col]);
+            if (ch == gap_uc || k_j[col] <= 0) continue;
+            const int idx  = lookup[col][ch];
+            const int c_ij = cnt[col][idx];
+            if (c_ij > 0)
+                hh_w[i] += 1.0 / (static_cast<double>(k_j[col]) * c_ij);
+        }
+        hh_w[i] /= static_cast<double>(L);
+    }
+    // Floating-point safeguard (analytically Σ=1, but guard all-gap sequences).
+    {
+        double sum_w = 0.0;
+        for (double wi : hh_w) sum_w += wi;
+        if (sum_w > 1e-14)
+            for (double& wi : hh_w) wi /= sum_w;
+        else
+            std::fill(hh_w.begin(), hh_w.end(), 1.0 / N);
+    }
+
+    // ---- 2. Build sparse Z (N × J), values = N·wᵢ. -------------------------
+    // total = N·L unchanged; row masses become wᵢ automatically.
     std::vector<Eigen::Triplet<double>> trips;
     trips.reserve(static_cast<size_t>(N) * L);
     for (int i = 0; i < N; ++i) {
-        const std::string& s = seqs[i];
+        const std::string& s  = seqs[i];
+        const double        zi = static_cast<double>(N) * hh_w[i];
         for (int col = 0; col < L; ++col) {
             int idx = lookup[col][static_cast<unsigned char>(s[col])];
             if (idx >= 0)
-                trips.emplace_back(i, off[col] + idx, 1.0);
+                trips.emplace_back(i, off[col] + idx, zi);
         }
     }
     Eigen::SparseMatrix<double, Eigen::RowMajor> Z(N, J);
@@ -180,7 +226,7 @@ inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components 
             row_sums(it.row()) += it.value();
             col_sums(it.col()) += it.value();
         }
-    Eigen::VectorXd r      = row_sums / total;   // ≈ 1/N
+    Eigen::VectorXd r      = row_sums / total;
     Eigen::VectorXd c_mass = col_sums / total;
 
     Eigen::VectorXd dr_inv_sqrt(N), dc_inv_sqrt(J), sqrt_r(N), sqrt_c(J);
@@ -193,19 +239,55 @@ inline MCAResult fit_mca(const std::vector<std::string>& seqs, int n_components 
         dc_inv_sqrt(j) = (c_mass(j) > 1e-14) ? 1.0 / sqrt_c(j) : 0.0;
     }
 
-    // ---- 3b. Cardinality normalisation. ------------------------------------
-    // Scale column j's block by 1/sqrt(Q_j) so every column contributes
-    // equally to the chi-square metric regardless of alphabet size.
-    // Without this, high-cardinality columns (noise/marginal positions with
-    // many rare characters) dominate over low-cardinality SDP columns.
+    // ---- 3b. Three-layer column normalisation. -----------------------------
+    // col_sums[α] × L = weighted fraction of character α at its column.
+    // Layers: (a) cardinality · (b) gap-aware entropy · (c) CV around 1/20.
+    static const char AAs20[20] = {
+        'A','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','Y'
+    };
     for (int col = 0; col < L; ++col) {
-        const int q_j = off[col + 1] - off[col];
-        if (q_j <= 1) continue;
-        const double w = 1.0 / std::sqrt(static_cast<double>(q_j));
-        for (int a = 0; a < q_j; ++a) {
+        const int gap_idx  = lookup[col][gap_uc];
+        const int q_all    = off[col + 1] - off[col];
+        const int q_nongap = q_all - (gap_idx >= 0 ? 1 : 0);
+        if (q_nongap <= 1) continue;
+
+        // (a) Cardinality: 1/√Q_j
+        const double w_card = 1.0 / std::sqrt(static_cast<double>(q_nongap));
+
+        // (b) Gap-aware entropy: exp(−S_j), S_j = g·ln20 + (1−g)·H(p̃)
+        // c_mass[α]*L = Σ_{i with α} hh_w[i] = weighted fraction of α at col j.
+        const double g_j = (gap_idx >= 0)
+                           ? c_mass[off[col] + gap_idx] * L
+                           : 0.0;
+        const double ng  = 1.0 - g_j;
+        double H_cond = 0.0;
+        if (ng > 1e-14) {
+            for (int a = 0; a < q_all; ++a) {
+                if (a == gap_idx) continue;
+                const double p_tilde = c_mass[off[col] + a] * L / ng;
+                if (p_tilde > 1e-14) H_cond -= p_tilde * std::log(p_tilde);
+            }
+        }
+        const double w_entr = std::exp(-(g_j * std::log(20.0) + ng * H_cond));
+
+        // (c) CV of residue frequencies around mean 1/20
+        constexpr double mean_aa = 1.0 / 20.0;
+        double sum_sq = 0.0;
+        for (int a = 0; a < 20; ++a) {
+            const int aa_idx = lookup[col][static_cast<unsigned char>(AAs20[a])];
+            const double p_aa = (aa_idx >= 0) ? c_mass[off[col] + aa_idx] * L : 0.0;
+            const double dev  = p_aa - mean_aa;
+            sum_sq += dev * dev;
+        }
+        const double w_cv = std::sqrt(sum_sq / 20.0) / mean_aa;
+
+        const double w_j = w_card * w_entr * w_cv;
+        if (w_j < 1e-15) continue;
+
+        for (int a = 0; a < q_all; ++a) {
             const int idx = off[col] + a;
-            dc_inv_sqrt(idx) *= w;
-            sqrt_c(idx)      *= w;
+            dc_inv_sqrt(idx) *= w_j;
+            sqrt_c(idx)      *= w_j;
         }
     }
 
