@@ -36,7 +36,8 @@ inline std::string agglomerative_newick(
         for (int i = 0; i < mca_res.inertia.size(); ++i) {
             double pct = 100.0 * mca_res.inertia(i) / total;
             std::cerr << "  dim" << (i + 1) << "=" << mca_res.inertia(i)
-                      << " (" << std::fixed << std::setprecision(1) << pct << "%)";
+                      << " (" << std::fixed << std::setprecision(1) << pct << "%)"
+                      << std::defaultfloat;
         }
         std::cerr << '\n';
     }
