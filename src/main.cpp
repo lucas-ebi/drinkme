@@ -1,16 +1,21 @@
 // DrinkMe – hierarchical clustering of MSAs using MCA + Ward linkage.
 //
-// Pipeline: FASTA MSA → column cleansing → cardinality-normalised MCA
-//           → Ward dendrogram → Newick tree (stdout)
+// Pipeline: FASTA MSA → column cleansing → H&H sequence weighting
+//           → three-layer column weighting → MCA → Ward dendrogram
+//           → Newick tree (stdout)
 //
 // Usage:
 //   drinkme <alignment.fasta> [options]
 
-#include "agglomerative.hpp"
+#include "cleanse.hpp"
 #include "fasta.hpp"
+#include "linkage.hpp"
+#include "mca.hpp"
+#include "newick.hpp"
 
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +35,7 @@ int main(int argc, char* argv[]) {
     std::string fasta_path;
     int         n_components     = 2;
     double      threshold        = 0.5;
+    char        gap_char         = '-';
     bool        lowercase_as_gap = true;
     bool        verbose          = false;
 
@@ -81,8 +87,31 @@ int main(int argc, char* argv[]) {
                       << " sequences, length " << raw[0].size() << '\n';
 
         auto t1 = clk::now();
-        std::cout << agglomerative_newick(raw, names, '-', lowercase_as_gap,
-                                          threshold, n_components, verbose) << '\n';
+
+        auto cl = cleanse_columns(raw, gap_char, lowercase_as_gap, threshold);
+        if (verbose)
+            std::cerr << "[drinkme] kept " << cl.kept_columns.size()
+                      << "/" << raw[0].size() << " columns (threshold=" << threshold << ")\n";
+
+        if (verbose) std::cerr << "[drinkme] MCA (k=" << n_components << ")...\n";
+        auto mca_res = fit_mca(cl.seqs, n_components, gap_char);
+        if (verbose) {
+            double total = mca_res.inertia.sum();
+            std::cerr << "[drinkme] inertia per component:";
+            for (int i = 0; i < mca_res.inertia.size(); ++i) {
+                double pct = 100.0 * mca_res.inertia(i) / total;
+                std::cerr << "  dim" << (i + 1) << "=" << mca_res.inertia(i)
+                          << " (" << std::fixed << std::setprecision(1) << pct << "%)"
+                          << std::defaultfloat;
+            }
+            std::cerr << '\n';
+        }
+
+        if (verbose) std::cerr << "[drinkme] Ward clustering...\n";
+        auto Z = ward_linkage(mca_res.coords);
+
+        if (verbose) std::cerr << "[drinkme] writing Newick tree...\n";
+        std::cout << to_newick(Z, names) << '\n';
 
         if (verbose)
             std::cerr << "[drinkme] total=" << elapsed(t0, clk::now()) << "ms"
